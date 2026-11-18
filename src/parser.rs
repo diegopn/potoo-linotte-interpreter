@@ -614,7 +614,7 @@ impl<'a> Parser<'a> {
             return Ok(Statement::Return(None, position));
         }
         if self.take("interromps") {
-            self.require("boucle")?;
+            self.take("boucle");
             return Ok(Statement::Break(position));
         }
         if self.take("termine") {
@@ -728,11 +728,8 @@ impl<'a> Parser<'a> {
                         position,
                     ));
                 }
-                return Ok(Statement::Command(
-                    word,
-                    self.command_arguments()?,
-                    position,
-                ));
+                let arguments = self.command_arguments(&word)?;
+                return Ok(Statement::Command(word, arguments, position));
             }
         }
         if self.take("~") {
@@ -787,6 +784,7 @@ impl<'a> Parser<'a> {
                 } else if matches!(role, Role::Species(_)) && self.take(",") {
                     Initial::Attributes(self.attributes()?)
                 } else {
+                    self.take("asupprimer");
                     Initial::Default
                 };
                 return Ok(Statement::Declare {
@@ -875,6 +873,7 @@ impl<'a> Parser<'a> {
     fn attributes(&mut self) -> Result<Vec<(String, Expr)>, Diagnostic> {
         let mut attributes = Vec::new();
         loop {
+            self.skip_lines();
             self.take("il");
             self.take("a");
             let name = self.name()?;
@@ -1007,7 +1006,7 @@ impl<'a> Parser<'a> {
             }
             return Ok(Statement::Host(resource, word, args, position));
         }
-        let mut args = self.command_arguments()?;
+        let mut args = self.command_arguments(&word)?;
         if matches!(word.as_str(), "attends" | "temporise") {
             let unit = if self.take_one(&["milliseconde", "millisecondes"]) {
                 "millisecondes"
@@ -1036,7 +1035,7 @@ impl<'a> Parser<'a> {
         Ok(values)
     }
 
-    fn command_arguments(&mut self) -> Result<Vec<Expr>, Diagnostic> {
+    fn command_arguments(&mut self, operation: &str) -> Result<Vec<Expr>, Diagnostic> {
         let mut args = Vec::new();
         while !self.at_end()
             && ![
@@ -1051,12 +1050,12 @@ impl<'a> Parser<'a> {
             .iter()
             .any(|word| self.matches(word))
         {
-            if self.matches("la")
-                && matches!(self.tokens.get(self.current+1).map(|t|t.kind),Some(Kind::Word(w)) if w.eq_ignore_ascii_case("position"))
-            {
-                self.advance();
-                self.advance();
-                self.require("de")?;
+            if operation == "cherche" && args.len() == 1 {
+                let start = self.current;
+                self.take("la");
+                if !self.take("position") || !self.take("de") {
+                    self.current = start;
+                }
             }
             if self.take("partir") {
                 self.require("de")?;

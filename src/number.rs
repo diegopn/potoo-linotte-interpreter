@@ -98,15 +98,7 @@ pub(crate) fn arithmetic(
             let context = bigdecimal::Context::new(NonZeroU64::new(precision).unwrap(), rounding);
             left.powi_with_context(exp, &context)
         }
-        Binary::Divide => {
-            if right.is_zero() {
-                return Err(position.error("division par zéro"));
-            }
-            if left.is_zero() {
-                return Ok(BigDecimal::zero());
-            }
-            division_with_guard_digit(left, right, precision)
-        }
+        Binary::Divide => return divide(left, right, precision, rounding, position),
         _ => return Err(position.error("opération numérique invalide")),
     };
     if precision == 0 {
@@ -114,6 +106,49 @@ pub(crate) fn arithmetic(
     }
     let precision = NonZeroU64::new(precision).expect("decimal precision is positive");
     normalize(result.with_precision_round(precision, rounding), position)
+}
+
+/// The statement uses the selected context even when its operands have more digits.
+pub(crate) fn divide_verb(
+    left: &BigDecimal,
+    right: &BigDecimal,
+    configured: Option<u64>,
+    position: Position,
+) -> Result<BigDecimal, Diagnostic> {
+    let (precision, rounding) = match configured {
+        Some(precision) => (precision, RoundingMode::HalfUp),
+        None => (DECIMAL128_DIGITS, RoundingMode::HalfEven),
+    };
+    divide(left, right, precision, rounding, position)
+}
+
+fn divide(
+    left: &BigDecimal,
+    right: &BigDecimal,
+    precision: u64,
+    rounding: RoundingMode,
+    position: Position,
+) -> Result<BigDecimal, Diagnostic> {
+    if right.is_zero() {
+        return Err(position.error("division par zéro"));
+    }
+    if left.is_zero() {
+        return Ok(BigDecimal::zero());
+    }
+    if let Some(digits) = NonZeroU64::new(precision) {
+        let quotient = division_with_guard_digit(left, right, precision);
+        return normalize(quotient.with_precision_round(digits, rounding), position);
+    }
+
+    // A terminating reduced denominator has only factors of two and five.
+    // Each decimal digit of the denominator can contribute at most log2(10)
+    // such factors. This bounds the digits needed to recover an exact quotient.
+    let bound = left.digits() + (10 * right.digits()).div_ceil(3);
+    let quotient = division_with_guard_digit(left, right, bound);
+    if &quotient * right != *left {
+        return Err(position.error("développement décimal illimité"));
+    }
+    normalize(quotient, position)
 }
 
 fn division_with_guard_digit(left: &BigDecimal, right: &BigDecimal, precision: u64) -> BigDecimal {

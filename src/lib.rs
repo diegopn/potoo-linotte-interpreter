@@ -17,7 +17,7 @@ use std::fmt;
 use std::io::{self, Write};
 
 pub use bigdecimal::BigDecimal;
-pub use host::{ActorRef, Event, EventArgument, Host, Request, Resource, Selector};
+pub use host::{ActorRef, Event, EventArgument, Host, MethodResult, Request, Resource, Selector};
 pub use parser::Role;
 
 #[derive(Debug)]

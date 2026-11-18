@@ -1,6 +1,6 @@
 use std::sync::{
     Arc, Mutex, Weak,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use crate::dispatch::Proxy;
@@ -13,6 +13,7 @@ struct Binding {
     id: u64,
     name: String,
     file: Option<File>,
+    removed: AtomicBool,
     root: Weak<Cell>,
 }
 
@@ -89,6 +90,7 @@ impl Place {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
             name: name.into(),
             file,
+            removed: AtomicBool::new(false),
             root: Arc::downgrade(&self.cell),
         });
         self.watch(&binding, pos, 0)?;
@@ -170,6 +172,101 @@ impl Place {
         })
     }
 
+    pub fn is_removed(&self) -> bool {
+        self.binding
+            .as_ref()
+            .is_some_and(|b| b.removed.load(Ordering::Acquire))
+    }
+
+    pub fn remove(&self, pos: Position) -> Outcome<()> {
+        let cell = self.resolve(pos)?;
+        // An indexed actor can also have its own declaration in a different scope.
+        let bindings: Vec<_> = cell
+            .observers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|b| b.root.ptr_eq(&Arc::downgrade(&cell)))
+            .collect();
+        let value = self.read(pos)?;
+        for binding in bindings {
+            if !binding.removed.swap(true, Ordering::AcqRel) {
+                let actor = ActorRef {
+                    id: binding.id,
+                    name: binding.name.clone(),
+                    path: Vec::new(),
+                };
+                binding
+                    .host
+                    .clone()
+                    .removed(&actor, &value)
+                    .map_err(|e| pos.error(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn check_alias_role(&self, expected: &Role, pos: Position) -> Outcome<()> {
+        let cell = self.resolve(pos)?;
+        let actual = if cell.role == Role::Dynamic {
+            self.read(pos)?.role()
+        } else {
+            cell.role.clone()
+        };
+        let valid = match (expected, &actual) {
+            (Role::Casier(Some(kind)), Role::Casier(actual))
+                if matches!(kind.as_ref(), Role::Species(_)) =>
+            {
+                actual.as_deref() == Some(kind.as_ref())
+                    || (actual.is_none()
+                        && self
+                            .items(pos)?
+                            .first()
+                            .map(|p| p.read(pos))
+                            .transpose()?
+                            .is_some_and(|v| v.role() == **kind))
+            }
+            (Role::Casier(_), Role::Casier(_)) => true,
+            _ => expected == &actual && *expected != Role::Dynamic,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(pos.error(format!("doublure incompatible avec le rôle {expected:?}")))
+        }
+    }
+
+    pub fn reload(&self, pos: Position) -> Outcome<()> {
+        let cell = self.resolve(pos)?;
+        let binding = cell
+            .observers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|b| {
+                b.file.is_some()
+                    && !b.removed.load(Ordering::Acquire)
+                    && b.root.ptr_eq(&Arc::downgrade(&cell))
+            });
+        let Some(binding) = binding else {
+            return Ok(());
+        };
+        let file = binding.file.as_ref().expect("file binding");
+        let Some(value) = file.load(&mut binding.host.clone(), &self.read(pos)?, pos)? else {
+            return Ok(());
+        };
+        let data = if let Value::Casier(items) = value {
+            let mut existing = self.items(pos)?;
+            existing.extend(items.into_iter().map(Place::literal));
+            Data::Casier(existing)
+        } else {
+            Data::from_value(value)
+        };
+        self.replace(&cell, data, pos, Some(binding.id))
+    }
+
     pub fn child(mut self, key: Selector) -> Self {
         self.path.push(key);
         self
@@ -214,6 +311,7 @@ impl Place {
             &cell,
             Data::from_value(convert(&cell.role, value, pos)?),
             pos,
+            None,
         )
     }
 
@@ -235,7 +333,7 @@ impl Place {
             }
             entries.push(place);
         }
-        self.replace(&cell, Data::Casier(entries), pos)
+        self.replace(&cell, Data::Casier(entries), pos, None)
     }
 
     fn contains(
@@ -280,13 +378,20 @@ impl Place {
         Ok(())
     }
 
-    fn replace(&self, cell: &Arc<Cell>, data: Data, pos: Position) -> Outcome<()> {
+    fn replace(
+        &self,
+        cell: &Arc<Cell>,
+        data: Data,
+        pos: Position,
+        reading: Option<u64>,
+    ) -> Outcome<()> {
         let observers: Vec<_> = cell
             .observers
             .lock()
             .unwrap()
             .iter()
             .filter_map(Weak::upgrade)
+            .filter(|b| !b.removed.load(Ordering::Acquire))
             .collect();
         for b in &observers {
             Self::watch_children(&data, b, pos, 0)?;
@@ -298,7 +403,9 @@ impl Place {
             };
             let value = Self::export(&root, pos, 0)?;
             let mut host = b.host.clone();
-            if let Some(file) = &b.file {
+            if let Some(file) = &b.file
+                && reading != Some(b.id)
+            {
                 file.save(&mut host, &value, pos)?;
             }
             let path = self

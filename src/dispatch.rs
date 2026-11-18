@@ -6,7 +6,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use crate::{ActorRef, Diagnostic, Event, Host, Request, Resource, Value};
+use crate::{ActorRef, Diagnostic, Event, Host, MethodResult, Request, Resource, Value};
 
 type Service = Box<dyn FnOnce(&mut dyn Host) + Send>;
 
@@ -122,6 +122,22 @@ impl Host for Proxy {
         let values = values.to_vec();
         let actors = actors.to_vec();
         self.send(move |h| h.bound_action(r, &op, &values, &actors))
+    }
+    fn method(
+        &mut self,
+        op: &str,
+        values: &[Value],
+        actors: &[Option<ActorRef>],
+    ) -> io::Result<MethodResult> {
+        let op = op.to_owned();
+        let values = values.to_owned();
+        let actors = actors.to_owned();
+        self.send(move |h| h.method(&op, &values, &actors))
+    }
+    fn removed(&mut self, actor: &ActorRef, value: &Value) -> io::Result<()> {
+        let actor = actor.clone();
+        let value = value.clone();
+        self.send(move |h| h.removed(&actor, &value))
     }
     fn changed(&mut self, actor: &ActorRef, root: &Value) -> io::Result<()> {
         let actor = actor.clone();

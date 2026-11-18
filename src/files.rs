@@ -6,16 +6,11 @@ use crate::{Host, Position, Request, Resource, Value};
 pub(crate) struct File {
     pub book: String,
     pub path: String,
+    pub element: Option<Value>,
 }
 
 impl File {
-    pub fn load(
-        &self,
-        host: &mut Proxy,
-        default: Value,
-        element: Option<&Value>,
-        pos: Position,
-    ) -> Outcome<Value> {
+    pub fn load(&self, host: &mut Proxy, default: &Value, pos: Position) -> Outcome<Option<Value>> {
         let arguments = [
             Value::Text(self.book.clone()),
             Value::Text(self.path.clone()),
@@ -27,12 +22,12 @@ impl File {
                 arguments: &arguments,
             })
             .map_err(|e| pos.error(e.to_string()))?;
-        let Some(raw) = raw else { return Ok(default) };
+        let Some(raw) = raw else { return Ok(None) };
         let Value::Text(raw) = raw else {
             return Err(pos.error("contenu du fichier invalide"));
         };
         let mut lines = raw.lines().peekable();
-        if let Some(element) = element {
+        if let Some(element) = &self.element {
             let mut items = Vec::new();
             while lines.peek().is_some() {
                 let mut item = element.clone();
@@ -41,13 +36,13 @@ impl File {
                 }
                 items.push(item);
             }
-            Ok(Value::Casier(items))
+            Ok(Some(Value::Casier(items)))
         } else {
-            let mut value = default;
+            let mut value = default.clone();
             if !read_item(&mut value, &mut lines, pos)? {
                 return Err(pos.error("fichier vide"));
             }
-            Ok(value)
+            Ok(Some(value))
         }
     }
 

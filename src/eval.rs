@@ -184,7 +184,9 @@ impl Runtime {
         if name == "création" {
             return self
                 .created
-                .clone()
+                .as_ref()
+                .filter(|p| !p.is_removed())
+                .cloned()
                 .map(Operand::Actor)
                 .ok_or_else(|| pos.error("aucune création"));
         }

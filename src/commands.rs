@@ -1,5 +1,5 @@
-use crate::eval::{binary, index_of, order};
-use crate::parser::{self, Binary, Expr, Instruction};
+use crate::eval::{index_of, order};
+use crate::parser::{self, Expr, Instruction};
 use crate::runtime::{Outcome, Place, Runtime};
 use crate::{Host, Position, Resource, Value};
 use bigdecimal::ToPrimitive;
@@ -15,6 +15,7 @@ impl Runtime {
         if let Some((index, choices)) =
             args.iter()
                 .enumerate()
+                .rev()
                 .find_map(|(i, e)| match e.as_slice() {
                     [Instruction::Alternatives(group, _)] => Some((i, group)),
                     _ => None,
@@ -123,8 +124,19 @@ impl Runtime {
 
     pub fn command(&mut self, op: &str, args: &[Expr], pos: Position) -> Outcome<()> {
         match op {
-            "fusionne" | "annihile" => return self.host_action(Resource::Graphics, op, args, pos),
-            "modifie" | "recharge" => return self.host_action(Resource::Plugin, op, args, pos),
+            "annihile" | "recharge" => {
+                let [expr] = args else {
+                    return Err(pos.error("un acteur attendu"));
+                };
+                let place = self.target(expr, pos)?;
+                return if op == "annihile" {
+                    self.remove_actor(&place, pos)
+                } else {
+                    place.reload(pos)
+                };
+            }
+            "fusionne" => return self.host_action(Resource::Graphics, op, args, pos),
+            "modifie" => return self.host_action(Resource::Plugin, op, args, pos),
 
             "attache" => return self.attach(args, pos),
             _ => {}
@@ -286,9 +298,9 @@ impl Runtime {
             ("ajoute", [a, Value::Text(s)]) => (1, Value::Text(format!("{s}{a}"))),
             ("soustrais", [Value::Number(a), Value::Number(b)]) => (1, Value::Number(b - a)),
             ("multiplie", [Value::Number(a), Value::Number(b)]) => (0, Value::Number(a * b)),
-            ("divise", [a, b]) => (
+            ("divise", [Value::Number(a), Value::Number(b)]) => (
                 0,
-                binary(Binary::Divide, a.clone(), b.clone(), pos, self.precision)?,
+                Value::Number(crate::number::divide_verb(a, b, self.precision, pos)?),
             ),
             ("incrémente" | "décrémente", [Value::Number(n)]) => (
                 0,

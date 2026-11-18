@@ -18,6 +18,22 @@ use crate::{BigDecimal, Diagnostic, Host, Position, Request, Resource, Value};
 pub(crate) type Outcome<T> = Result<T, Diagnostic>;
 type Scope = HashMap<String, Place>;
 
+#[derive(Clone)]
+struct ImportedBook {
+    source: String,
+    title: String,
+    program: Arc<Program>,
+    globals: Scope,
+    templates: Scope,
+}
+
+fn default_title(source: &str) -> String {
+    std::path::Path::new(source)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Livre sans nom".into())
+}
+
 pub(crate) enum Flow {
     Continue,
     Return(Option<Value>),
@@ -43,7 +59,7 @@ pub(crate) struct Runtime {
     events: bool,
     lambdas: Vec<HashMap<String, (Vec<String>, Expr)>>,
     pending: VecDeque<(String, JoinHandle<Outcome<()>>)>,
-    imports: HashMap<(String, String), (String, Arc<Program>, Scope, Scope)>,
+    imports: HashMap<(String, String), ImportedBook>,
     loading: Vec<String>,
 }
 
@@ -54,14 +70,7 @@ pub(crate) fn run(book: &str, program: Program, host: &mut dyn Host) -> Outcome<
 fn run_book(book: &str, program: Program, host: Proxy) -> Outcome<()> {
     let mut rt = Runtime {
         book: book.to_owned(),
-        title: if book.is_empty() {
-            "Livre sans nom".into()
-        } else {
-            std::path::Path::new(book)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| book.into())
-        },
+        title: default_title(book),
         program: Arc::new(program),
         host,
         scopes: vec![Scope::new()],
@@ -113,7 +122,7 @@ impl Runtime {
                 let value = crate::number::parse_number(&raw, first.position)
                     .map(Value::Number)
                     .unwrap_or(Value::Text(raw));
-                args.push(Place::new(value, Role::Dynamic));
+                args.push(Place::literal(value));
             }
             if let Some(result) = self.call(&first.name, args, first.position)? {
                 self.print(&result, first.position)?;
@@ -177,20 +186,37 @@ impl Runtime {
             let imported = Arc::new(parser::parse(&source)?);
             self.loading.push(self.book.clone());
             let saved_book = std::mem::replace(&mut self.book, book.clone());
-            let saved_title = std::mem::replace(&mut self.title, book.clone());
+            let saved_title = std::mem::replace(&mut self.title, default_title(&book));
             let saved_program = std::mem::replace(&mut self.program, imported.clone());
             let saved_scopes = std::mem::replace(&mut self.scopes, vec![Scope::new()]);
             let saved_templates = std::mem::take(&mut self.templates);
-            let result = self.initialize();
+            let result = self.initialize().and_then(|_| {
+                for statement in &imported.main {
+                    if let Statement::Command(op, args, p) = statement
+                        && op == "nomme"
+                    {
+                        self.command(op, args, *p)?;
+                    }
+                }
+                Ok(())
+            });
             let globals = std::mem::replace(&mut self.scopes, saved_scopes).remove(0);
             let templates = std::mem::replace(&mut self.templates, saved_templates);
             self.book = saved_book;
-            self.title = saved_title;
+            let title = std::mem::replace(&mut self.title, saved_title);
             self.program = saved_program;
             self.loading.pop();
             result?;
-            self.imports
-                .insert(id, (book, imported, globals, templates));
+            self.imports.insert(
+                id,
+                ImportedBook {
+                    source: book,
+                    title,
+                    program: imported,
+                    globals,
+                    templates,
+                },
+            );
         }
         self.execute(&program.templates)?;
         self.templates = std::mem::take(&mut self.scopes[0]);
@@ -199,7 +225,18 @@ impl Runtime {
     }
 
     pub fn find(&self, name: &str) -> Option<Place> {
-        self.scopes.iter().rev().find_map(|s| s.get(name).cloned())
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.get(name).filter(|p| !p.is_removed()).cloned())
+    }
+
+    pub fn remove_actor(&mut self, place: &Place, pos: Position) -> Outcome<()> {
+        place.remove(pos)?;
+        for scope in &mut self.scopes {
+            scope.retain(|_, p| !p.is_removed());
+        }
+        Ok(())
     }
 
     fn current(&mut self) -> &mut Scope {
@@ -318,11 +355,14 @@ impl Runtime {
         pos: Position,
     ) -> Outcome<()> {
         self.check_name(name, pos)?;
-        if input && let Some(bound) = self.current().get(name) {
-            convert(role, bound.read(pos)?, pos)?;
+        if input && let Some(bound) = self.current().get(name).filter(|p| !p.is_removed()) {
+            if !matches!(initial, Initial::Default) {
+                return Err(pos.error("une doublure ne prend pas de valeur initiale"));
+            }
+            bound.check_alias_role(role, pos)?;
             return Ok(());
         }
-        if self.current().contains_key(name) {
+        if self.current().get(name).is_some_and(|p| !p.is_removed()) {
             return Err(pos.error(format!("acteur « {name} » déjà déclaré")));
         }
         let mut file = None;
@@ -360,16 +400,19 @@ impl Runtime {
                 let Value::Text(path) = self.eval(expr)? else {
                     return Err(pos.error("chemin de fichier attendu"));
                 };
-                let source = File {
-                    book: self.book.clone(),
-                    path,
-                };
                 let default = self.default_value(role, pos, 0)?;
                 let element = match role {
                     Role::Casier(Some(kind)) => Some(self.default_value(kind, pos, 0)?),
                     _ => None,
                 };
-                let value = source.load(&mut self.host, default, element.as_ref(), pos)?;
+                let source = File {
+                    book: self.book.clone(),
+                    path,
+                    element,
+                };
+                let value = source
+                    .load(&mut self.host, &default, pos)?
+                    .unwrap_or(default);
                 file = Some(source);
                 value
             }
@@ -449,14 +492,26 @@ impl Runtime {
             }
         }
         if !attached && !declared {
-            let mut values = vec![receiver.read(pos)?];
-            for arg in args {
-                values.push(arg.read(pos)?);
-            }
+            let operands: Vec<_> = std::iter::once(receiver).chain(args).collect();
+            let values = operands
+                .iter()
+                .map(|p| p.read(pos))
+                .collect::<Outcome<Vec<_>>>()?;
             if let Some(value) = self.internal_method(name, &values, pos)? {
                 return Ok(Some(value));
             }
-            return self.service(Resource::Plugin, name, &values, pos);
+            let actors = operands.iter().map(Place::reference).collect::<Vec<_>>();
+            let result = self
+                .host
+                .method(name, &values, &actors)
+                .map_err(|e| pos.error(e.to_string()))?;
+            for (index, value) in result.updates {
+                operands
+                    .get(index)
+                    .ok_or_else(|| pos.error("indice de paramètre du service invalide"))?
+                    .write(value, pos)?;
+            }
+            return Ok(result.value);
         }
         self.invoke(name, args, Some(receiver), pos)
     }
@@ -621,25 +676,32 @@ impl Runtime {
     ) -> Outcome<()> {
         let args = self.arguments(args)?;
         let key = (self.book.clone(), name.to_owned());
-        let (book, program, global, templates) = self
+        let imported = self
             .imports
             .get(&key)
             .cloned()
             .ok_or_else(|| pos.error(format!("livre « {name} » inconnu")))?;
-        let saved_title = std::mem::replace(&mut self.title, book.clone());
-        let saved_book = std::mem::replace(&mut self.book, book);
-        let saved_program = std::mem::replace(&mut self.program, program);
-        let saved_scopes = std::mem::replace(&mut self.scopes, vec![global]);
-        let saved_templates = std::mem::replace(&mut self.templates, templates);
+        let saved_title = std::mem::replace(&mut self.title, imported.title);
+        let saved_book = std::mem::replace(&mut self.book, imported.source);
+        let saved_program = std::mem::replace(&mut self.program, imported.program);
+        let saved_scopes = std::mem::replace(&mut self.scopes, vec![imported.globals]);
+        let saved_templates = std::mem::replace(&mut self.templates, imported.templates);
         let result = self.call(function, args, pos);
-        self.title = saved_title;
-        let book = std::mem::replace(&mut self.book, saved_book);
+        let title = std::mem::replace(&mut self.title, saved_title);
+        let source = std::mem::replace(&mut self.book, saved_book);
         let program = std::mem::replace(&mut self.program, saved_program);
-        let global = std::mem::replace(&mut self.scopes, saved_scopes).remove(0);
+        let globals = std::mem::replace(&mut self.scopes, saved_scopes).remove(0);
         let templates = std::mem::replace(&mut self.templates, saved_templates);
-        if result.is_ok() {
-            self.imports.insert(key, (book, program, global, templates));
-        }
+        self.imports.insert(
+            key,
+            ImportedBook {
+                source,
+                title,
+                program,
+                globals,
+                templates,
+            },
+        );
         result.map(|_| ())
     }
 
@@ -668,7 +730,10 @@ impl Runtime {
                         .iter()
                         .rev()
                         .flat_map(|s| s.values())
-                        .find(|place| place.reference().is_some_and(|b| b.id == reference.id))
+                        .find(|place| {
+                            !place.is_removed()
+                                && place.reference().is_some_and(|b| b.id == reference.id)
+                        })
                         .cloned()
                         .ok_or_else(|| pos.error("acteur d’événement hors de portée"))?;
                     place.path = reference.path;
@@ -903,7 +968,8 @@ impl Runtime {
                 next,
                 position,
             } => {
-                let start = self.eval(start)?.number(*position)?.clone();
+                let lower = self.operand(start)?;
+                let start = lower.value(*position)?.number(*position)?.clone();
                 let end = self.operand(end)?;
                 let initial_end = end.value(pos)?.number(pos)?.clone();
                 let target = match actor {
@@ -928,7 +994,7 @@ impl Runtime {
                     };
                     if (ascending && counter > end)
                         || (!ascending && counter < end)
-                        || (next.is_some() && counter < start)
+                        || (next.is_some() && &counter < lower.value(pos)?.number(pos)?)
                     {
                         break;
                     }

@@ -50,6 +50,14 @@ pub struct Request<'a> {
     pub arguments: &'a [Value],
 }
 
+/// Return value and positional actor changes from a plugin method.
+#[derive(Default, Debug)]
+pub struct MethodResult {
+    pub value: Option<Value>,
+    /// Position zero is the receiver. Subsequent positions are method arguments.
+    pub updates: Vec<(usize, Value)>,
+}
+
 /// Supplies optional services to a Linotte program. The host controls access to
 /// external resources and may reject an operation with an I/O error.
 pub trait Host {
@@ -94,6 +102,28 @@ pub trait Host {
         _actors: &[Option<ActorRef>],
     ) -> io::Result<Vec<(usize, Value)>> {
         self.action(resource, operation, values)
+    }
+
+    /// Calls a plugin method with the receiver first in both parallel slices.
+    fn method(
+        &mut self,
+        operation: &str,
+        values: &[Value],
+        _actors: &[Option<ActorRef>],
+    ) -> io::Result<MethodResult> {
+        Ok(MethodResult {
+            value: self.request(Request {
+                resource: Resource::Plugin,
+                operation,
+                arguments: values,
+            })?,
+            updates: Vec::new(),
+        })
+    }
+
+    /// Releases any platform resources associated with a removed actor.
+    fn removed(&mut self, _actor: &ActorRef, _value: &Value) -> io::Result<()> {
+        Ok(())
     }
 
     /// Receives the current root value after a declaration or assignment.
