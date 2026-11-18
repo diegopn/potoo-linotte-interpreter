@@ -7,7 +7,7 @@
 <p align="center">An independent Rust interpreter library and CLI for the Linotte programming language.</p>
 
 <p align="center">
-  <a href="https://github.com/diegopn/potoo-linotte-interpreter/releases/tag/v0.1.0">Download</a> ·
+  <a href="https://github.com/diegopn/potoo-linotte-interpreter/releases/latest">Download</a> ·
   <a href="https://diegopn.github.io/potoo-site/">Website</a> ·
   <a href="https://diegopn.github.io/potoo-site/manual/linotte/">User manual</a>
 </p>
