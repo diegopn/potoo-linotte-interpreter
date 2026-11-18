@@ -183,14 +183,14 @@ fn official_314_majordome_plugin_examples_keep_default_and_explicit_attributes()
     let mut host = ProbeHost::default();
     execute_with_host(
         "plugin.liv",
-        "messager est un majordometest\naffiche messager.présentation(\"Jules\")\nmessager2 est un majordometest2, serviteur vaut \"Claude\"\naffiche messager2.présentation(\"Jules\")",
+        "messager est un majordometest\naffiche messager.présentation(\"Jules\")\nmessager2 est un majordometest2, serviteur vaut \"Camille\"\naffiche messager2.présentation(\"Jules\")",
         &mut host,
     )
     .unwrap();
 
     assert_eq!(
         host.output,
-        "Bonsoir, mon cher Jules, je suis votre serviteur Nestor\nBonsoir, mon cher Jules, je suis votre serviteur Claude\n".as_bytes()
+        "Bonsoir, mon cher Jules, je suis votre serviteur Nestor\nBonsoir, mon cher Jules, je suis votre serviteur Camille\n".as_bytes()
     );
 }
 
