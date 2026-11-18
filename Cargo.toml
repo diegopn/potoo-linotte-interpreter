@@ -6,7 +6,7 @@ rust-version = "1.93"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/diegopn/potoo-linotte-interpreter"
 readme = "README.md"
-description = "A Rust interpreter for the Linotte programming language"
+description = "A Rust interpreter for the educational Linotte programming language"
 
 [dependencies]
 bigdecimal = "0.4.11"

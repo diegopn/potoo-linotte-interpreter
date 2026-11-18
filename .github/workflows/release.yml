@@ -2,23 +2,15 @@ name: Release
 
 on:
   pull_request:
-    branches:
-      - main
-    types:
-      - closed
+    branches: [main]
+    types: [closed]
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag to build
-        required: true
-        type: string
-        default: v0.1.0
 
 permissions:
-  contents: write
+  actions: read
+  contents: read
 
 jobs:
   build:
@@ -34,37 +26,50 @@ jobs:
           - runner: macos-15-intel
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all-targets
-      - run: cargo build --release --bin potoo-linotte
+        with:
+          target: ${{ matrix.target }}
+      - name: Check release tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          test "$GITHUB_REF_NAME" = "v$version"
+      - run: cargo test --locked --all-targets --target ${{ matrix.target }}
+      - run: cargo build --locked --release --bin potoo-linotte --target ${{ matrix.target }}
       - name: Package Unix archive
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ github.event.inputs.tag || github.ref_name }}"
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
             version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          else
+            version="$GITHUB_REF_NAME"
           fi
-          bundle="potoo-linotte-interpreter-${version}-${{ matrix.target }}"
+          bundle="potoo-linotte-interpreter-${version}-${TARGET}"
           mkdir -p "$bundle"
-          cp "target/release/potoo-linotte" "$bundle/"
+          cp "target/${TARGET}/release/potoo-linotte" "$bundle/"
           tar -czf "$bundle.tar.gz" "$bundle"
       - name: Package Windows archive
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $version = "${{ github.event.inputs.tag || github.ref_name }}"
           if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
             $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          } else {
+            $version = $env:GITHUB_REF_NAME
           }
-          $bundle = "potoo-linotte-interpreter-$version-${{ matrix.target }}"
+          $bundle = "potoo-linotte-interpreter-$version-$env:TARGET"
           New-Item -ItemType Directory -Force $bundle | Out-Null
-          Copy-Item "target/release/potoo-linotte.exe" -Destination $bundle
+          Copy-Item "target/$env:TARGET/release/potoo-linotte.exe" -Destination $bundle
           Compress-Archive -Path $bundle -DestinationPath "$bundle.zip"
       - uses: actions/upload-artifact@v4
         with:
@@ -73,20 +78,23 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
-      - name: Generate checksums and create GitHub Release
+      - name: Generate checksums and publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="$GITHUB_REF_NAME"
           cd release-assets
           sha256sum *.tar.gz *.zip > SHA256SUMS
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -97,5 +105,5 @@ jobs:
             gh release create "$tag" *.tar.gz *.zip SHA256SUMS \
               --repo "$GITHUB_REPOSITORY" \
               --title "Linotte interpreter $tag" \
-              --notes "Initial standalone binary release of the Linotte Rust interpreter and CLI. Supported targets: Linux x86_64 (GNU), Windows x86_64 (MSVC), and macOS Intel (x86_64). Apple silicon is not supported in this version. Each archive contains only the compiled CLI executable. See README.md for installation and usage; verify downloads with SHA256SUMS. GitHub source snapshots are separate from these binary packages."
+              --notes "Standalone CLI for Linotte 3.14. Verified targets: Linux x86_64 GNU, Windows x86_64 MSVC, and macOS Intel x86_64. Apple silicon and universal macOS binaries are not included. Each archive contains the CLI executable; SHA256SUMS contains checksums."
           fi
