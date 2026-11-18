@@ -22,6 +22,17 @@ pub(crate) fn parse_number(text: &str, position: Position) -> Result<BigDecimal,
 
 pub(crate) fn normalize(number: BigDecimal, position: Position) -> Result<BigDecimal, Diagnostic> {
     let number = number.normalized();
+    check_size(&number, position)?;
+
+    // Expression results use scale zero for whole numbers.
+    if number.fractional_digit_count() < 0 {
+        Ok(number.with_scale(0))
+    } else {
+        Ok(number)
+    }
+}
+
+fn check_size(number: &BigDecimal, position: Position) -> Result<(), Diagnostic> {
     let scale = number.fractional_digit_count();
     let digits = number.digits();
     if i32::try_from(scale).is_err()
@@ -30,12 +41,7 @@ pub(crate) fn normalize(number: BigDecimal, position: Position) -> Result<BigDec
         return Err(position.error("nombre hors des limites de cet interpréteur"));
     }
 
-    // In Linotte, whole numbers use scale zero even when the coefficient ends in zero.
-    if number.fractional_digit_count() < 0 {
-        Ok(number.with_scale(0))
-    } else {
-        Ok(number)
-    }
+    Ok(())
 }
 
 pub(crate) fn arithmetic(
@@ -98,7 +104,12 @@ pub(crate) fn arithmetic(
             let context = bigdecimal::Context::new(NonZeroU64::new(precision).unwrap(), rounding);
             left.powi_with_context(exp, &context)
         }
-        Binary::Divide => return divide(left, right, precision, rounding, position),
+        Binary::Divide => {
+            return normalize(
+                divide(left, right, precision, rounding, position)?,
+                position,
+            );
+        }
         _ => return Err(position.error("opération numérique invalide")),
     };
     if precision == 0 {
@@ -132,23 +143,39 @@ fn divide(
     if right.is_zero() {
         return Err(position.error("division par zéro"));
     }
-    if left.is_zero() {
-        return Ok(BigDecimal::zero());
-    }
-    if let Some(digits) = NonZeroU64::new(precision) {
-        let quotient = division_with_guard_digit(left, right, precision);
-        return normalize(quotient.with_precision_round(digits, rounding), position);
-    }
-
-    // A terminating reduced denominator has only factors of two and five.
-    // Each decimal digit of the denominator can contribute at most log2(10)
-    // such factors. This bounds the digits needed to recover an exact quotient.
-    let bound = left.digits() + (10 * right.digits()).div_ceil(3);
-    let quotient = division_with_guard_digit(left, right, bound);
-    if &quotient * right != *left {
-        return Err(position.error("développement décimal illimité"));
-    }
-    normalize(quotient, position)
+    let preferred_scale = left.fractional_digit_count() - right.fractional_digit_count();
+    let quotient = if left.is_zero() {
+        BigDecimal::new(
+            BigInt::from(0),
+            preferred_scale.clamp(i32::MIN.into(), i32::MAX.into()),
+        )
+    } else if let Some(digits) = NonZeroU64::new(precision) {
+        let guard = division_with_guard_digit(left, right, precision);
+        let mut rounded = guard.with_precision_round(digits, rounding);
+        // A carry into a new leading digit can exceed the precision by one.
+        if rounded.digits() > precision {
+            rounded = rounded.with_scale(rounded.fractional_digit_count() - 1);
+        }
+        if &rounded * right == *left {
+            // Keep the scale closest to the preferred scale that fits the context.
+            let finest = rounded.fractional_digit_count();
+            let coarsest = rounded.normalized().fractional_digit_count();
+            rounded.with_scale(preferred_scale.clamp(coarsest, finest))
+        } else {
+            rounded
+        }
+    } else {
+        // Each decimal digit of a terminating denominator can contribute at most
+        // log2(10) factors of two or five to the exact quotient.
+        let bound = left.digits() + (10 * right.digits()).div_ceil(3);
+        let exact = division_with_guard_digit(left, right, bound).normalized();
+        if &exact * right != *left {
+            return Err(position.error("développement décimal illimité"));
+        }
+        exact.with_scale(exact.fractional_digit_count().max(preferred_scale))
+    };
+    check_size(&quotient, position)?;
+    Ok(quotient)
 }
 
 fn division_with_guard_digit(left: &BigDecimal, right: &BigDecimal, precision: u64) -> BigDecimal {
@@ -176,7 +203,9 @@ fn division_with_guard_digit(left: &BigDecimal, right: &BigDecimal, precision: u
 }
 
 pub(crate) fn format_number(number: &BigDecimal) -> String {
-    if number.order_of_magnitude() >= -6 {
+    let scale = number.fractional_digit_count();
+    let exponent = number.digits() as i64 - 1 - scale;
+    if scale >= 0 && exponent >= -6 {
         return number.to_plain_string();
     }
     let mut coefficient = number.as_bigint_and_scale().0.to_string();
@@ -184,5 +213,5 @@ pub(crate) fn format_number(number: &BigDecimal) -> String {
     if coefficient.len() > first_digit + 1 {
         coefficient.insert(first_digit + 1, '.');
     }
-    format!("{coefficient}E{}", number.order_of_magnitude())
+    format!("{coefficient}E{exponent:+}")
 }

@@ -42,6 +42,7 @@ impl Data {
 
 struct Cell {
     role: Role,
+    identity: Mutex<Option<Arc<Binding>>>,
     data: Mutex<Data>,
     methods: Mutex<Vec<String>>,
     observers: Mutex<Vec<Weak<Binding>>>,
@@ -68,6 +69,7 @@ impl Place {
         Self {
             cell: Arc::new(Cell {
                 role,
+                identity: Mutex::new(None),
                 data: Mutex::new(data),
                 methods: Default::default(),
                 observers: Default::default(),
@@ -84,6 +86,15 @@ impl Place {
         file: Option<File>,
         pos: Position,
     ) -> Outcome<Self> {
+        let cell = Arc::clone(&self.cell);
+        let mut identity = cell.identity.lock().unwrap();
+        if let Some(binding) = identity
+            .as_ref()
+            .filter(|b| !b.removed.load(Ordering::Acquire))
+        {
+            self.binding = Some(binding.clone());
+            return Ok(self);
+        }
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let binding = Arc::new(Binding {
             host: host.clone(),
@@ -94,10 +105,11 @@ impl Place {
             root: Arc::downgrade(&self.cell),
         });
         self.watch(&binding, pos, 0)?;
-        self.binding = Some(binding);
+        self.binding = Some(binding.clone());
         host.clone()
             .changed(&self.reference().unwrap(), &self.read(pos)?)
             .map_err(|e| pos.error(e.to_string()))?;
+        *identity = Some(binding);
         Ok(self)
     }
 

@@ -124,7 +124,8 @@ impl Runtime {
                     .unwrap_or(Value::Text(raw));
                 args.push(Place::literal(value));
             }
-            if let Some(result) = self.call(&first.name, args, first.position)? {
+            let flow = self.invoke_once(&first.name, args, None, first.position, &params)?;
+            if let Some(result) = self.finish_call(flow)? {
                 self.print(&result, first.position)?;
             }
         } else {
@@ -549,9 +550,13 @@ impl Runtime {
         receiver: Option<Place>,
         pos: Position,
     ) -> Outcome<Option<Value>> {
-        let mut flow = self.invoke_once(name, args, receiver, pos)?;
+        let flow = self.invoke_once(name, args, receiver, pos, &[])?;
+        self.finish_call(flow)
+    }
+
+    fn finish_call(&mut self, mut flow: Flow) -> Outcome<Option<Value>> {
         while let Flow::Jump(name, p) = flow {
-            flow = self.invoke_once(&name, vec![], None, p)?;
+            flow = self.invoke_once(&name, vec![], None, p, &[])?;
         }
         match flow {
             Flow::Return(v) => Ok(v),
@@ -566,6 +571,7 @@ impl Runtime {
         args: Vec<Place>,
         receiver: Option<Place>,
         pos: Position,
+        prompted: &[String],
     ) -> Outcome<Flow> {
         pos.check_depth(self.calls)?;
         if let Some((params, expr)) = self
@@ -603,7 +609,7 @@ impl Runtime {
         self.scopes.push(frame);
         self.lambdas.push(HashMap::new());
         self.calls += 1;
-        let result = self.execute(&function.body);
+        let result = self.execute_statements(&function.body, prompted);
         self.calls -= 1;
         self.lambdas.pop();
         self.scopes.pop();
@@ -730,6 +736,7 @@ impl Runtime {
                         .iter()
                         .rev()
                         .flat_map(|s| s.values())
+                        .chain(self.jokers.iter().rev())
                         .find(|place| {
                             !place.is_removed()
                                 && place.reference().is_some_and(|b| b.id == reference.id)
@@ -748,6 +755,14 @@ impl Runtime {
     }
 
     fn execute(&mut self, statements: &[Statement]) -> Outcome<Flow> {
+        self.execute_statements(statements, &[])
+    }
+
+    fn execute_statements(
+        &mut self,
+        statements: &[Statement],
+        prompted: &[String],
+    ) -> Outcome<Flow> {
         for statement in statements {
             if self.stopped || self.host.cancelled() {
                 return Ok(Flow::Stop);
@@ -777,6 +792,13 @@ impl Runtime {
                     ..
                 } => {
                     for name in actors {
+                        if *input
+                            && prompted.contains(name)
+                            && !matches!(role, Role::Dynamic | Role::Species(_))
+                        {
+                            self.check_name(name, pos)?;
+                            continue;
+                        }
                         self.declare(name, role, value, *input, pos)?;
                     }
                     Flow::Continue
@@ -1032,9 +1054,11 @@ impl Runtime {
                         .checkpoint()
                         .map_err(|e| pos.error(e.to_string()))?;
                     let item = match source.read(pos)? {
-                        Value::Casier(items) if i < items.len() => {
-                            source.clone().child(Key::Index(i)).detached_path(pos)?
-                        }
+                        Value::Casier(items) if i < items.len() => source
+                            .clone()
+                            .child(Key::Index(i))
+                            .detached_path(pos)?
+                            .bind("", &self.host, None, pos)?,
                         Value::Number(n) if n.to_usize().is_some_and(|count| i < count) => {
                             Place::new(Value::Number((i as u64).into()), Role::Number)
                         }
