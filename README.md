@@ -114,9 +114,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `execute_with_host(book, source, host)` accepts a `Host` for input, books, files, random values, dates, graphics, audio, plugins, network access, cancellation, and callbacks.
 
+`execute_with_atelier_tests(book, source, host)` opts into the book's Atelier transcript checks. It supplies declared `>` input, compares each `<` expected output in sequence, accepts `*` as an output wildcard, and returns the number of checks consumed. Normal execution leaves these declarations as metadata and sends them to `Host::transcript`.
+
 Potoo IDE supplies platform services through this interface. The standalone CLI provides terminal input and output, local books and files, random numbers, calendar fields, and delays.
 
-Compatibility targets the pinned 3.14 release. Atelier test declarations are not executed by this interpreter; platform services are provided by the host.
+Compatibility targets the pinned 3.14 release. Graphic rendering and input, MIDI/audio playback, plugins, and network behavior require a host implementation. The standalone runner does not provide those services.
+
+Text values that contain isolated UTF-16 surrogates use `Value::TextUnits`, created with `Value::from_utf16_units`; text operations and file actor transfers preserve those code units. Console output and host text input use UTF-8 strings, so an isolated surrogate is rendered as the replacement character at that boundary. The standalone runner also replaces isolated surrogates when writing a UTF-8 file. File paths and imported book source use the host's UTF-8 string interface.
+
+The release is the compatibility target, not a claim of exhaustive equivalence. The regression suite covers selected official 3.14 examples and host contracts. The Java reference applies the process locale to some full-string case conversions; this interpreter uses locale-independent Unicode mappings for those operations. Graphics, audio, plugins, network access, and file behavior also depend on the host and operating system.
 
 ## Development
 

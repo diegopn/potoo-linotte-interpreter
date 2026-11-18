@@ -23,10 +23,10 @@ impl File {
             })
             .map_err(|e| pos.error(e.to_string()))?;
         let Some(raw) = raw else { return Ok(None) };
-        let Value::Text(raw) = raw else {
+        let Some(raw) = raw.utf16_units() else {
             return Err(pos.error("contenu du fichier invalide"));
         };
-        let mut lines = raw.lines().peekable();
+        let mut lines = split_lines(&raw).into_iter().peekable();
         if let Some(element) = &self.element {
             let mut items = Vec::new();
             while lines.peek().is_some() {
@@ -47,12 +47,12 @@ impl File {
     }
 
     pub fn save(&self, host: &mut Proxy, value: &Value, pos: Position) -> Outcome<()> {
-        let mut text = String::new();
+        let mut text = Vec::new();
         write_item(value, &mut text, false);
         let arguments = [
             Value::Text(self.book.clone()),
             Value::Text(self.path.clone()),
-            Value::Text(text),
+            Value::from_utf16_units(text),
         ];
         host.request(Request {
             resource: Resource::Files,
@@ -64,9 +64,9 @@ impl File {
     }
 }
 
-fn read_item<'a>(
+fn read_item(
     item: &mut Value,
-    lines: &mut impl Iterator<Item = &'a str>,
+    lines: &mut impl Iterator<Item = Vec<u16>>,
     pos: Position,
 ) -> Outcome<bool> {
     match item {
@@ -88,15 +88,19 @@ fn read_item<'a>(
                 return Ok(false);
             };
             *item = match item {
-                Value::Number(_) => Value::Number(crate::number::parse_number(line, pos)?),
-                _ => Value::Text(line.into()),
+                Value::Number(_) => {
+                    let text = String::from_utf16(&line)
+                        .map_err(|_| pos.error("nombre de fichier UTF-16 invalide"))?;
+                    Value::Number(crate::number::parse_number(&text, pos)?)
+                }
+                _ => Value::from_utf16_units(line),
             };
             Ok(true)
         }
     }
 }
 
-fn write_item(item: &Value, text: &mut String, newline: bool) {
+fn write_item(item: &Value, text: &mut Vec<u16>, newline: bool) {
     match item {
         Value::Casier(items) => {
             for v in items {
@@ -111,10 +115,32 @@ fn write_item(item: &Value, text: &mut String, newline: bool) {
             }
         }
         _ => {
-            text.push_str(&item.to_string());
+            item.append_utf16(text);
             if newline {
-                text.push_str(if cfg!(windows) { "\r\n" } else { "\n" });
+                text.extend(if cfg!(windows) { "\r\n" } else { "\n" }.encode_utf16());
             }
         }
     }
+}
+
+fn split_lines(text: &[u16]) -> Vec<Vec<u16>> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    while index < text.len() {
+        if matches!(text[index], 10 | 13) {
+            lines.push(text[start..index].to_vec());
+            if text[index] == 13 && text.get(index + 1) == Some(&10) {
+                index += 1;
+            }
+            index += 1;
+            start = index;
+        } else {
+            index += 1;
+        }
+    }
+    if start < text.len() {
+        lines.push(text[start..].to_vec());
+    }
+    lines
 }

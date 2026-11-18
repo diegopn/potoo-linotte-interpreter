@@ -75,6 +75,11 @@ impl Host for Proxy {
         self.send(move |h| h.write(&bytes))
     }
 
+    fn prompt(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let bytes = bytes.to_vec();
+        self.send(move |h| h.prompt(&bytes))
+    }
+
     fn read(&mut self, actor: &str, current: &Value) -> io::Result<Option<String>> {
         let actor = actor.to_owned();
         let current = current.clone();

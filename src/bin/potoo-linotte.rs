@@ -67,11 +67,17 @@ impl Host for Console {
                     Err(e) => Err(e),
                 }
             }
-            (
-                Resource::Files,
-                "écrire",
-                [Value::Text(book), Value::Text(path), Value::Text(text)],
-            ) => {
+            (Resource::Files, "écrire", [Value::Text(book), Value::Text(path), content]) => {
+                let text = match content {
+                    Value::Text(text) => text.clone(),
+                    Value::TextUnits(units) => String::from_utf16_lossy(units),
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "contenu de fichier invalide",
+                        ));
+                    }
+                };
                 fs::write(resolve(book, path), text)?;
                 Ok(None)
             }

@@ -81,19 +81,19 @@ impl Runtime {
                     result?
                 }
                 Instruction::Interpolate(fragments) => {
-                    let mut text = String::new();
+                    let mut text = Vec::new();
                     for part in fragments {
                         match part {
-                            Fragment::Text(s) => text.push_str(s),
+                            Fragment::Text(s) => text.extend(s.encode_utf16()),
                             Fragment::Expression(source, raw) => {
                                 match parser::parse_expression(source).and_then(|e| self.eval(&e)) {
-                                    Ok(v) => text.push_str(&v.to_string()),
-                                    Err(_) => text.push_str(raw),
+                                    Ok(v) => v.append_utf16(&mut text),
+                                    Err(_) => text.extend(raw.encode_utf16()),
                                 }
                             }
                         }
                     }
-                    Operand::Literal(Value::Text(text))
+                    Operand::Literal(Value::from_utf16_units(text))
                 }
                 Instruction::Binary(op, p) => {
                     let right = stack.pop().unwrap().value(*p)?;
@@ -115,12 +115,12 @@ impl Runtime {
                     for index in indices {
                         let i = index_of(&self.eval(index)?, *p)?;
                         base = match base.value(*p)? {
-                            Value::Text(s) => Operand::Literal(Value::Text(
-                                s.chars()
-                                    .nth(i)
-                                    .ok_or_else(|| p.error("indice hors limites"))?
-                                    .to_string(),
-                            )),
+                            Value::Text(_) | Value::TextUnits(_) => {
+                                let units = base.value(*p)?.utf16_units().unwrap();
+                                let unit =
+                                    *units.get(i).ok_or_else(|| p.error("indice hors limites"))?;
+                                Operand::Literal(Value::from_utf16_units(vec![unit]))
+                            }
                             Value::Casier(_) => {
                                 Operand::Actor(base.as_place(*p)?.child(Key::Index(i)))
                             }
@@ -258,17 +258,24 @@ impl Runtime {
         };
         match (name, arg) {
             ("clone", _) => return Ok(arg.clone()),
-            ("ascii", Value::Text(s)) => {
-                return s
-                    .encode_utf16()
-                    .next()
-                    .map(|c| Value::Number(c.into()))
-                    .ok_or_else(|| pos.error("texte vide"));
+            ("ascii", value) if value.is_text() => {
+                return Ok(Value::Number(
+                    value
+                        .utf16_units()
+                        .unwrap()
+                        .first()
+                        .copied()
+                        .unwrap_or(32)
+                        .into(),
+                ));
             }
-            ("unicode", Value::Text(s)) => {
-                let n =
-                    u16::from_str_radix(s, 16).map_err(|_| pos.error("code Unicode invalide"))?;
-                return Ok(Value::Text(String::from_utf16_lossy(&[n])));
+            ("unicode", value) if value.is_text() => {
+                let text = value
+                    .text_utf8()
+                    .ok_or_else(|| pos.error("code Unicode invalide"))?;
+                let n = i32::from_str_radix(&text, 16)
+                    .map_err(|_| pos.error("code Unicode invalide"))?;
+                return Ok(Value::from_utf16_units(vec![n as u16]));
             }
             ("hasard", _) => {
                 return self
@@ -289,10 +296,10 @@ impl Runtime {
             "cube" => n * n * n,
             "non" => return Ok(Value::flag(n.with_scale(0).is_zero())),
             "chr" => {
-                return Ok(Value::Text(String::from_utf16_lossy(&[n
-                    .to_i64()
-                    .ok_or_else(|| pos.error("code hors limites"))?
-                    as u16])));
+                let code = n.with_scale(0) % BigDecimal::from(1u32 << 16);
+                return Ok(Value::from_utf16_units(vec![
+                    code.to_i64().expect("remainder fits in an i64") as u16,
+                ]));
             }
             _ => {
                 let x = float(arg, pos)?;
@@ -372,7 +379,10 @@ pub(crate) fn index_of(value: &Value, pos: Position) -> Outcome<usize> {
 
 pub(crate) fn equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
-        (Value::Text(a), Value::Text(b)) => a.to_lowercase() == b.to_lowercase(),
+        (a, b) if a.is_text() && b.is_text() => {
+            crate::text::lower(&a.utf16_units().unwrap())
+                == crate::text::lower(&b.utf16_units().unwrap())
+        }
         (Value::Casier(a), Value::Casier(b)) => {
             a.len() == b.len() && a.iter().zip(b).all(|(a, b)| equal(a, b))
         }
@@ -399,7 +409,9 @@ pub(crate) fn equal(left: &Value, right: &Value) -> bool {
 pub(crate) fn order(left: &Value, right: &Value, pos: Position) -> Outcome<Ordering> {
     match (left, right) {
         (Value::Number(a), Value::Number(b)) => Ok(a.cmp(b)),
-        (Value::Text(a), Value::Text(b)) => Ok(a.encode_utf16().cmp(b.encode_utf16())),
+        (a, b) if a.is_text() && b.is_text() => {
+            Ok(a.utf16_units().unwrap().cmp(&b.utf16_units().unwrap()))
+        }
         _ => Err(pos.error("deux nombres ou deux textes sont attendus")),
     }
 }
@@ -456,41 +468,54 @@ pub(crate) fn binary(
         }
         Binary::Join => return Ok(Value::Casier(vec![left, right])),
         Binary::Add
-            if matches!(
-                (&left, &right),
-                (Value::Text(_), Value::Text(_) | Value::Number(_))
-                    | (Value::Number(_), Value::Text(_))
-            ) =>
+            if (left.is_text()
+                && matches!(
+                    right,
+                    Value::Text(_) | Value::TextUnits(_) | Value::Number(_)
+                ))
+                || (right.is_text() && matches!(left, Value::Number(_))) =>
         {
-            return Ok(Value::Text(format!("{left}{right}")));
+            let mut output = Vec::new();
+            left.append_utf16(&mut output);
+            right.append_utf16(&mut output);
+            return Ok(Value::from_utf16_units(output));
         }
         Binary::Multiply => {
-            if let (Value::Text(text), Value::Number(count))
-            | (Value::Number(count), Value::Text(text)) = (&left, &right)
+            if let (Some(text), Value::Number(count)) = (left.utf16_units(), &right)
+                && left.is_text()
             {
-                let count = if count <= &BigDecimal::from(0) {
-                    0
-                } else {
-                    count
-                        .to_usize()
-                        .ok_or_else(|| pos.error("texte trop long"))?
-                };
-                let size = text
-                    .len()
-                    .checked_mul(count)
-                    .ok_or_else(|| pos.error("texte trop long"))?;
-                let mut out = String::new();
-                out.try_reserve_exact(size)
-                    .map_err(|_| pos.error("texte trop long"))?;
-                if !text.is_empty() {
-                    for _ in 0..count {
-                        out.push_str(text);
-                    }
-                }
-                return Ok(Value::Text(out));
+                return repeat_text(text, count, pos);
+            }
+            if let (Value::Number(count), Some(text)) = (&left, right.utf16_units())
+                && right.is_text()
+            {
+                return repeat_text(text, count, pos);
             }
         }
         _ => {}
     }
     arithmetic(op, left.number(pos)?, right.number(pos)?, pos, precision).map(Value::Number)
+}
+
+fn repeat_text(text: Vec<u16>, count: &BigDecimal, pos: Position) -> Outcome<Value> {
+    let count = if count <= &BigDecimal::from(0) {
+        0
+    } else {
+        count
+            .to_usize()
+            .ok_or_else(|| pos.error("texte trop long"))?
+    };
+    let size = text
+        .len()
+        .checked_mul(count)
+        .ok_or_else(|| pos.error("texte trop long"))?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(size)
+        .map_err(|_| pos.error("texte trop long"))?;
+    if !text.is_empty() {
+        for _ in 0..count {
+            out.extend_from_slice(&text);
+        }
+    }
+    Ok(Value::from_utf16_units(out))
 }

@@ -112,7 +112,7 @@ impl Runtime {
             let params = parameters(first);
             for name in &params {
                 self.host
-                    .write(format!("Quelle est la valeur de l'acteur '{name}' ?\n").as_bytes())
+                    .prompt(format!("Quelle est la valeur de l'acteur '{name}' ?\n").as_bytes())
                     .map_err(|e| first.position.error(e.to_string()))?;
                 let raw = self
                     .host
@@ -446,7 +446,7 @@ impl Runtime {
         {
             let value = match value {
                 Value::Number(_) => Value::Number(crate::number::parse_number(&raw, pos)?),
-                Value::Text(_) => Value::Text(raw),
+                Value::Text(_) | Value::TextUnits(_) => Value::Text(raw),
                 _ => return Err(pos.error("un texte ou un nombre est attendu")),
             };
             place.write(value, pos)?;
@@ -1062,10 +1062,15 @@ impl Runtime {
                         Value::Number(n) if n.to_usize().is_some_and(|count| i < count) => {
                             Place::new(Value::Number((i as u64).into()), Role::Number)
                         }
-                        Value::Text(s) => match s.chars().nth(i) {
-                            Some(c) => Place::new(Value::Text(c.to_string()), Role::Text),
-                            None => break,
-                        },
+                        value @ (Value::Text(_) | Value::TextUnits(_)) => {
+                            let units = value.utf16_units().unwrap();
+                            match units.get(i) {
+                                Some(unit) => {
+                                    Place::new(Value::from_utf16_units(vec![*unit]), Role::Text)
+                                }
+                                None => break,
+                            }
+                        }
                         Value::Species { .. } => {
                             return Err(pos.error("casier, texte ou nombre attendu"));
                         }
@@ -1109,7 +1114,9 @@ impl Runtime {
             Condition::Empty(expr, invert, pos) => {
                 let empty = match self.eval(expr)? {
                     Value::Number(n) => n.is_zero(),
-                    Value::Text(s) => s.is_empty(),
+                    value @ (Value::Text(_) | Value::TextUnits(_)) => {
+                        value.utf16_units().unwrap().is_empty()
+                    }
                     Value::Casier(c) => c.is_empty(),
                     _ => return Err(pos.error("condition de vide invalide")),
                 };
@@ -1119,8 +1126,10 @@ impl Runtime {
                 let haystack = self.eval(expr)?;
                 let needle = self.eval(sought)?;
                 match (haystack, needle) {
-                    (Value::Text(s), Value::Text(n)) => {
-                        Ok(s.to_lowercase().contains(&n.to_lowercase()))
+                    (s, n) if s.is_text() && n.is_text() => {
+                        let haystack = crate::text::lower(&s.utf16_units().unwrap());
+                        let needle = crate::text::lower(&n.utf16_units().unwrap());
+                        Ok(crate::text::find(&haystack, &needle, 0).is_some())
                     }
                     (Value::Casier(c), n) => Ok(c.iter().any(|v| crate::eval::equal(v, &n))),
                     _ => Err(pos.error("texte ou casier attendu")),

@@ -1037,6 +1037,7 @@ impl<'a> Parser<'a> {
 
     fn command_arguments(&mut self, operation: &str) -> Result<Vec<Expr>, Diagnostic> {
         let mut args = Vec::new();
+        let mut add_destination = false;
         while !self.at_end()
             && ![
                 "sinon",
@@ -1061,8 +1062,17 @@ impl<'a> Parser<'a> {
                 self.require("de")?;
             }
             self.take("de");
-            let arg = self.grouped_argument()?;
+            let arg = if add_destination {
+                add_destination = false;
+                self.grouped_argument_with_attributes()?
+            } else {
+                self.grouped_argument()?
+            };
             args.push(arg);
+            if operation == "ajoute" && args.len() == 1 && self.take("dans") {
+                add_destination = true;
+                continue;
+            }
             if !self.take_one(&[
                 ",", "dans", "de", "par", "avec", "depuis", "à", "vers", "et", "en", "sur", "pour",
             ]) {
@@ -1070,6 +1080,25 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(args)
+    }
+
+    fn grouped_argument_with_attributes(&mut self) -> Result<Expr, Diagnostic> {
+        let pos = self.token().position;
+        let attribute_de = std::mem::replace(&mut self.attribute_de, true);
+        let result = self.expression_level(3);
+        self.attribute_de = attribute_de;
+        let mut values = vec![result?];
+        while self.take("&") {
+            let attribute_de = std::mem::replace(&mut self.attribute_de, true);
+            let result = self.expression_level(3);
+            self.attribute_de = attribute_de;
+            values.push(result?);
+        }
+        if values.len() == 1 {
+            Ok(values.remove(0))
+        } else {
+            Ok(vec![Instruction::Alternatives(values, pos)])
+        }
     }
 
     fn before_de(&mut self, minimum: u8) -> Result<Expr, Diagnostic> {

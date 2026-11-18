@@ -50,12 +50,16 @@ impl Runtime {
             .map(|v| v.value(pos))
             .collect::<Outcome<Vec<_>>>()?;
         if op == "questionne" {
-            let [value, Value::Text(prompt)] = values.as_slice() else {
+            let [value, prompt] = values.as_slice() else {
                 return Err(pos.error("question invalide"));
             };
+            if !prompt.is_text() {
+                return Err(pos.error("question invalide"));
+            }
             let [crate::eval::Operand::Actor(place), _] = operands.as_slice() else {
                 return Err(pos.error("acteur attendu"));
             };
+            let prompt = prompt.text_lossy().unwrap();
             self.host
                 .write(format!("{prompt}\n").as_bytes())
                 .map_err(|e| pos.error(e.to_string()))?;
@@ -69,7 +73,7 @@ impl Runtime {
             {
                 let result = match value {
                     Value::Number(_) => Value::Number(crate::number::parse_number(&raw, pos)?),
-                    Value::Text(_) => Value::Text(raw),
+                    Value::Text(_) | Value::TextUnits(_) => Value::Text(raw),
                     _ => return Err(pos.error("nombre ou texte attendu")),
                 };
                 place.write(result, pos)?;
@@ -77,7 +81,13 @@ impl Runtime {
             return Ok(());
         }
         if resource == Resource::Clock && matches!(op, "attends" | "temporise") {
-            let [Value::Number(amount), Value::Text(unit)] = values.as_slice() else {
+            let [Value::Number(amount), unit] = values.as_slice() else {
+                self.host
+                    .action(resource, op, &values)
+                    .map_err(|e| pos.error(e.to_string()))?;
+                return Ok(());
+            };
+            let Some(unit) = unit.text_utf8() else {
                 self.host
                     .action(resource, op, &values)
                     .map_err(|e| pos.error(e.to_string()))?;
@@ -248,54 +258,66 @@ impl Runtime {
                 return Ok(());
             }
             ("fais le café", []) => return Err(pos.error("impossible de faire le café")),
-            ("provoque", [Value::Number(code), Value::Text(message)])
-                if code >= &crate::BigDecimal::from(10100) =>
+            ("provoque", [Value::Number(code), message])
+                if message.is_text() && code >= &crate::BigDecimal::from(10100) =>
             {
                 return Err(pos.error(format!("{code} : {message}")));
             }
             ("vide", [Value::Casier(_)]) => (0, Value::Casier(Vec::new())),
-            ("vide", [Value::Text(_)]) => (0, Value::Text(String::new())),
+            ("vide", [value]) if value.is_text() => (0, Value::Text(String::new())),
             ("vide", [Value::Number(_)]) => (0, Value::Number(0.into())),
-            ("inverse", [Value::Text(s)]) => (0, Value::Text(s.chars().rev().collect())),
+            ("inverse", [value]) if value.is_text() => (
+                0,
+                Value::from_utf16_units(crate::text::reverse(&value.utf16_units().unwrap())),
+            ),
             ("inverse" | "mélange", [Value::Number(_)]) => {
                 let value = self
                     .service(Resource::Random, "hasard", &values, pos)?
                     .ok_or_else(|| pos.error("nombre aléatoire attendu"))?;
                 (0, value)
             }
-            ("mélange", [Value::Text(s)]) => {
-                let mut chars: Vec<_> = s.chars().collect();
-                self.shuffle(&mut chars, pos)?;
-                (0, Value::Text(chars.into_iter().collect()))
+            ("mélange", [value]) if value.is_text() => {
+                let mut units = value.utf16_units().unwrap();
+                self.shuffle(&mut units, pos)?;
+                (0, Value::from_utf16_units(units))
             }
             ("copie", [from, _]) => (1, from.clone()),
-            ("convertis", [Value::Text(s), Value::Number(_)]) => (
+            ("convertis", [s, Value::Number(_)]) if s.is_text() => (
                 1,
-                Value::Number(crate::number::parse_number(s, pos).unwrap_or_else(|_| 0.into())),
+                Value::Number(
+                    crate::number::parse_number(&s.text_utf8().unwrap_or_default(), pos)
+                        .unwrap_or_else(|_| 0.into()),
+                ),
             ),
-            ("convertis", [Value::Number(n), Value::Text(_)]) => {
+            ("convertis", [Value::Number(n), text]) if text.is_text() => {
                 (1, Value::Text(crate::number::format_number(n)))
             }
-            ("mesure", [Value::Text(s), Value::Number(_)]) => {
-                (1, Value::Number((s.encode_utf16().count() as u64).into()))
-            }
+            ("mesure", [s, Value::Number(_)]) if s.is_text() => (
+                1,
+                Value::Number((s.utf16_units().unwrap().len() as u64).into()),
+            ),
             ("mesure", [Value::Casier(c), Value::Number(_)]) => {
                 (1, Value::Number((c.len() as u64).into()))
             }
-            ("concatène", [parts @ .., Value::Text(_)]) if !parts.is_empty() => {
+            ("concatène", [parts @ .., target]) if !parts.is_empty() && target.is_text() => {
                 if parts
                     .iter()
-                    .any(|v| !matches!(v, Value::Text(_) | Value::Number(_)))
+                    .any(|v| !v.is_text() && !matches!(v, Value::Number(_)))
                 {
                     return Err(pos.error("texte ou nombre attendu"));
                 }
-                (
-                    parts.len(),
-                    Value::Text(parts.iter().map(ToString::to_string).collect()),
-                )
+                let mut units = Vec::new();
+                for part in parts {
+                    part.append_utf16(&mut units);
+                }
+                (parts.len(), Value::from_utf16_units(units))
             }
             ("ajoute", [Value::Number(a), Value::Number(b)]) => (1, Value::Number(a + b)),
-            ("ajoute", [a, Value::Text(s)]) => (1, Value::Text(format!("{s}{a}"))),
+            ("ajoute", [a, s]) if s.is_text() => {
+                let mut units = s.utf16_units().unwrap();
+                a.append_utf16(&mut units);
+                (1, Value::from_utf16_units(units))
+            }
             ("soustrais", [Value::Number(a), Value::Number(b)]) => (1, Value::Number(b - a)),
             ("multiplie", [Value::Number(a), Value::Number(b)]) => (0, Value::Number(a * b)),
             ("divise", [Value::Number(a), Value::Number(b)]) => (
@@ -313,31 +335,32 @@ impl Runtime {
                     .map_or(0, |i| i + 1);
                 (0, Value::Number((index as u64).into()))
             }
-            ("cherche", [Value::Number(_), Value::Text(n), Value::Text(s)]) => {
-                let s = s.to_lowercase();
-                let index = s
-                    .find(&n.to_lowercase())
-                    .map(|byte| s[..byte].encode_utf16().count());
+            ("cherche", [Value::Number(_), n, s]) if n.is_text() && s.is_text() => {
+                let haystack = crate::text::lower_simple(&s.utf16_units().unwrap());
+                let needle = crate::text::lower_simple(&n.utf16_units().unwrap());
+                let index = crate::text::find(&haystack, &needle, 0);
                 (0, Value::Number(index.map_or(-1, |i| i as i64).into()))
             }
-            ("insère", [Value::Text(v), n, Value::Text(s)]) => {
-                let mut units: Vec<_> = s.encode_utf16().collect();
+            ("insère", [v, n, s]) if v.is_text() && s.is_text() => {
+                let mut units = s.utf16_units().unwrap();
                 let i = one_based(n, pos)?;
                 if i > units.len() {
                     return Err(pos.error("indice hors limites"));
                 }
-                units.splice(i..i, v.encode_utf16());
-                (2, Value::Text(String::from_utf16_lossy(&units)))
+                units.splice(i..i, v.utf16_units().unwrap());
+                (2, Value::from_utf16_units(units))
             }
             ("extrais", [source, a, b, _]) => {
                 let range = one_based(a, pos)?..index_of(b, pos)?;
                 let value = match source {
-                    Value::Text(s) => {
-                        let u: Vec<_> = s.encode_utf16().collect();
-                        Value::Text(String::from_utf16_lossy(
-                            u.get(range)
-                                .ok_or_else(|| pos.error("indices hors limites"))?,
-                        ))
+                    source if source.is_text() => {
+                        let units = source.utf16_units().unwrap();
+                        Value::from_utf16_units(
+                            units
+                                .get(range)
+                                .ok_or_else(|| pos.error("indices hors limites"))?
+                                .to_vec(),
+                        )
                     }
                     Value::Casier(c) => Value::Casier(
                         c.get(range)
@@ -348,9 +371,17 @@ impl Runtime {
                 };
                 (3, value)
             }
-            ("évalue" | "evalue", [Value::Text(s)]) => {
-                let value = self.eval(&parser::parse_expression(s)?)?;
-                (0, Value::Text(value.to_string()))
+            ("évalue" | "evalue", [s]) if s.is_text() => {
+                let text = s
+                    .text_utf8()
+                    .ok_or_else(|| pos.error("expression UTF-16 invalide"))?;
+                let value = self.eval(&parser::parse_expression(&text)?)?;
+                let value = if value.is_text() {
+                    value
+                } else {
+                    Value::Text(value.to_string())
+                };
+                (0, value)
             }
             _ => return Err(pos.error(format!("paramètres invalides pour « {op} »"))),
         };
@@ -367,59 +398,58 @@ impl Runtime {
         pos: Position,
     ) -> Outcome<Option<Value>> {
         let result = match (name, values) {
-            ("minuscule", [Value::Text(s)]) => Value::Text(s.to_lowercase()),
-            ("majuscule", [Value::Text(s)]) => Value::Text(s.to_uppercase()),
-            ("inverser", [Value::Text(s)]) => Value::Text(s.chars().rev().collect()),
-            ("capitaliser", [Value::Text(s)]) => {
-                let words = s
-                    .split(char::is_whitespace)
-                    .map(|word| {
-                        let lower = word.to_lowercase();
-                        let mut chars = lower.chars();
-                        chars
-                            .next()
-                            .map(|c| format!("{}{}", c.to_uppercase(), chars.as_str()))
-                            .unwrap_or_default()
-                    })
-                    .collect::<Vec<_>>();
-                Value::Text(words.join(" "))
+            ("minuscule", [s]) if s.is_text() => {
+                Value::from_utf16_units(crate::text::lower(&s.utf16_units().unwrap()))
             }
-            ("remplacer", [Value::Text(s), Value::Text(from), Value::Text(to)]) => {
-                Value::Text(s.replace(from, to))
+            ("majuscule", [s]) if s.is_text() => {
+                Value::from_utf16_units(crate::text::uppercase(&s.utf16_units().unwrap()))
             }
-            ("mélanger", [Value::Text(s)]) => {
-                let mut chars: Vec<_> = s.chars().collect();
-                self.shuffle(&mut chars, pos)?;
-                Value::Text(chars.into_iter().collect())
+            ("inverser", [s]) if s.is_text() => {
+                Value::from_utf16_units(crate::text::reverse(&s.utf16_units().unwrap()))
+            }
+            ("capitaliser", [s]) if s.is_text() => {
+                Value::from_utf16_units(crate::text::capitalize(&s.utf16_units().unwrap()))
+            }
+            ("remplacer", [s, from, to]) if s.is_text() && from.is_text() && to.is_text() => {
+                Value::from_utf16_units(crate::text::replace(
+                    &s.utf16_units().unwrap(),
+                    &from.utf16_units().unwrap(),
+                    &to.utf16_units().unwrap(),
+                ))
+            }
+            ("mélanger", [s]) if s.is_text() => {
+                let mut units = s.utf16_units().unwrap();
+                self.shuffle(&mut units, pos)?;
+                Value::from_utf16_units(units)
             }
             ("mélanger", [Value::Casier(c)]) => {
                 let mut c = c.clone();
                 self.shuffle(&mut c, pos)?;
                 Value::Casier(c)
             }
-            ("taille", [Value::Text(s)]) => Value::Number((s.encode_utf16().count() as u64).into()),
+            ("taille", [s]) if s.is_text() => {
+                Value::Number((s.utf16_units().unwrap().len() as u64).into())
+            }
             ("taille", [Value::Casier(c)]) => Value::Number((c.len() as u64).into()),
-            ("position", [Value::Text(s), start, Value::Text(query)]) => {
-                let start = index_of(start, pos)?;
-                let units: Vec<_> = s.encode_utf16().collect();
-                let index = units
-                    .get(start..)
-                    .and_then(|tail| {
-                        let text = String::from_utf16_lossy(tail).to_lowercase();
-                        text.find(&query.to_lowercase())
-                            .map(|i| (start + text[..i].encode_utf16().count()) as i64)
-                    })
-                    .unwrap_or(-1);
+            ("position", [s, start, query]) if s.is_text() && query.is_text() => {
+                let Value::Number(start) = start else {
+                    return Err(pos.error("un nombre est attendu pour l’indice"));
+                };
+                let start = java_int_value(start).max(0) as usize;
+                let units = s.utf16_units().unwrap();
+                let haystack = crate::text::lower_simple(&units);
+                let needle = crate::text::lower_simple(&query.utf16_units().unwrap());
+                let index = crate::text::find(&haystack, &needle, start).map_or(-1, |i| i as i64);
                 Value::Number(index.into())
             }
-            ("extraire", [Value::Text(s), start, end]) => {
-                let units: Vec<_> = s.encode_utf16().collect();
+            ("extraire", [s, start, end]) if s.is_text() => {
+                let units = s.utf16_units().unwrap();
                 let range = index_of(start, pos)?..index_of(end, pos)?;
-                Value::Text(String::from_utf16_lossy(
+                Value::from_utf16_units(
                     units
                         .get(range)
                         .ok_or_else(|| pos.error("indices hors limites"))?,
-                ))
+                )
             }
             ("extraire", [Value::Casier(c), start, end]) => {
                 let range = one_based(start, pos)?..index_of(end, pos)?;
@@ -458,4 +488,11 @@ fn one_based(value: &Value, pos: Position) -> Outcome<usize> {
     index_of(value, pos)?
         .checked_sub(1)
         .ok_or_else(|| pos.error("indice hors limites"))
+}
+
+fn java_int_value(value: &crate::BigDecimal) -> i32 {
+    let modulus = crate::BigDecimal::from(1u64 << 32);
+    ((value.with_scale(0) % modulus)
+        .to_i64()
+        .expect("remainder fits in an i64")) as i32
 }

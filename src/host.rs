@@ -61,9 +61,16 @@ pub struct MethodResult {
 /// Supplies optional services to a Linotte program. The host controls access to
 /// external resources and may reject an operation with an I/O error.
 pub trait Host {
+    /// Writes UTF-8 console bytes emitted by the interpreter.
     fn write(&mut self, bytes: &[u8]) -> io::Result<()>;
 
-    /// Reads one console value. No value leaves the destination actor unchanged.
+    /// Displays a prompt before a host input request. Transcript test hosts may
+    /// suppress prompts while preserving input ordering.
+    fn prompt(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.write(bytes)
+    }
+
+    /// Reads one UTF-8 console value. No value leaves the destination actor unchanged.
     fn read(&mut self, _actor: &str, _current: &Value) -> io::Result<Option<String>> {
         Err(unavailable("demande"))
     }
