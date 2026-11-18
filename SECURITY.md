@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The `develop` branch is the active development line. Reports affecting `develop` and the latest published release will be considered; older releases may no longer receive security updates.
+The latest published release and the `main` branch are supported for security reports. Reports affecting `develop` are also considered while changes are in progress; older releases may no longer receive security updates.
 
 ## Report a vulnerability
 
@@ -14,4 +14,4 @@ For non-security issues, see [CONTRIBUTING.md](CONTRIBUTING.md). For conduct con
 
 ## Security boundaries
 
-The repository currently contains only a crate scaffold and does not execute Linotte source. This policy will be updated with the runtime boundaries and resource limits before source execution is implemented. When execution is introduced, hosts running untrusted source should apply process isolation; resource limits alone are not an operating-system sandbox.
+Linotte books execute in the embedding process. The `Host` interface controls access to external services, but it is not an operating-system sandbox and does not by itself impose general CPU or memory quotas. Applications that run untrusted books should use operating-system process isolation and apply their own resource limits.
