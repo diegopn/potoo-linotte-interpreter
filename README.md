@@ -39,6 +39,8 @@ No Apple silicon or universal macOS binary is published. Other source-build targ
 - [Grammar and vocabulary](https://github.com/cpc6128/LangageLinotte/tree/0ab8043bd6676e443f279410910ab6a3e1d354e1/linotte-resources/src/main/resources/grammaires) and [execution actions](https://github.com/cpc6128/LangageLinotte/tree/0ab8043bd6676e443f279410910ab6a3e1d354e1/linotte-moteur/src/main/java/org/linotte/moteur/xml/actions)
 - [Numeric evaluation](https://github.com/cpc6128/LangageLinotte/blob/0ab8043bd6676e443f279410910ab6a3e1d354e1/linotte-moteur/src/main/java/org/linotte/moteur/xml/analyse/Mathematiques.java) and [arithmetic operations](https://github.com/cpc6128/LangageLinotte/tree/0ab8043bd6676e443f279410910ab6a3e1d354e1/linotte-moteur/src/main/java/org/linotte/moteur/xml/operation/simple)
 
+See [reference coverage](REFERENCE-COVERAGE.md) for the pinned release coverage, tests, and environment boundaries.
+
 The original repository specifies GPL version 3. This independent implementation is licensed under [GPL-3.0-or-later](LICENSE).
 
 ## Source example
