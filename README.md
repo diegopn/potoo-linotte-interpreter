@@ -25,19 +25,22 @@ Linotte is an educational programming language written in French. This interpret
 
 ### Verified binary targets
 
-GitHub release binaries are built and tested for these x86_64 targets:
+The v0.1.1 GitHub release provides native builds for these targets:
 
-- Linux GNU (`x86_64-unknown-linux-gnu`), as a `.tar.gz` archive
-- Windows MSVC (`x86_64-pc-windows-msvc`), as a `.zip` archive containing `potoo-linotte.exe`
-- macOS Intel (`x86_64-apple-darwin`), as a `.tar.gz` archive
+- Linux x86_64 GNU (`x86_64-unknown-linux-gnu`), as a `.tar.gz` archive
+- Windows x86_64 MSVC (`x86_64-pc-windows-msvc`), as a `.zip` archive containing `potoo-linotte.exe`
+- Intel macOS x86_64 (`x86_64-apple-darwin`), as a `.tar.gz` archive
+- Apple silicon macOS arm64 (`aarch64-apple-darwin`), as a `.tar.gz` archive
 
-No Apple silicon or universal macOS binary is published. Other source-build targets are not verified by this project.
+The macOS archives are architecture-specific, not universal. Other source-build targets are not verified by this project.
 
 ## Original language references
 
 - [Linotte 3 tutorial](https://github.com/cpc6128/LangageLinotte/wiki/D%C3%A9couvrir-Linotte-3-en-dix-minutes) and [examples from the 3.14 release](https://github.com/cpc6128/LangageLinotte/tree/0ab8043bd6676e443f279410910ab6a3e1d354e1/linotte-resources/src/main/exemples)
 - [Grammar and vocabulary](https://github.com/cpc6128/LangageLinotte/tree/0ab8043bd6676e443f279410910ab6a3e1d354e1/linotte-resources/src/main/resources/grammaires) and [execution actions](https://github.com/cpc6128/LangageLinotte/tree/0ab8043bd6676e443f279410910ab6a3e1d354e1/linotte-moteur/src/main/java/org/linotte/moteur/xml/actions)
 - [Numeric evaluation](https://github.com/cpc6128/LangageLinotte/blob/0ab8043bd6676e443f279410910ab6a3e1d354e1/linotte-moteur/src/main/java/org/linotte/moteur/xml/analyse/Mathematiques.java) and [arithmetic operations](https://github.com/cpc6128/LangageLinotte/tree/0ab8043bd6676e443f279410910ab6a3e1d354e1/linotte-moteur/src/main/java/org/linotte/moteur/xml/operation/simple)
+
+See [reference coverage](REFERENCE-COVERAGE.md) for the pinned release coverage, tests, and environment boundaries.
 
 The original repository specifies GPL version 3. This independent implementation is licensed under [GPL-3.0-or-later](LICENSE).
 
@@ -50,6 +53,71 @@ affiche "Bonjour !"
 ```
 
 ## Standalone command-line runner
+
+### Install a prebuilt CLI
+
+The v0.1.1 release provides native CLI packages for Linux x86_64 GNU, Windows x86_64 MSVC, Intel macOS x86_64, and Apple silicon macOS arm64. Download the archive for your system and `SHA256SUMS` from the [latest release](https://github.com/diegopn/potoo-linotte-interpreter/releases/latest), then run the commands below from the folder containing both files. Each archive contains `potoo-linotte` (or `potoo-linotte.exe` on Windows) and the repository license. The package does not include a sample book; use your own `.liv` file or create the example shown above.
+
+#### Linux x86_64 GNU
+
+```sh
+set -euo pipefail
+archive="potoo-linotte-interpreter-v0.1.1-x86_64-unknown-linux-gnu.tar.gz"
+grep -F "  $archive" SHA256SUMS | sha256sum --check -
+tar -xzf "$archive"
+mkdir -p "$HOME/.local/bin"
+install -m 755 "${archive%.tar.gz}/potoo-linotte" "$HOME/.local/bin/potoo-linotte"
+export PATH="$HOME/.local/bin:$PATH"
+potoo-linotte bonjour.liv
+```
+
+To keep the command available in new Linux sessions, add the `export PATH="$HOME/.local/bin:$PATH"` line to your shell profile.
+
+#### Windows x86_64 MSVC (PowerShell)
+
+```powershell
+$archive = "potoo-linotte-interpreter-v0.1.1-x86_64-pc-windows-msvc.zip"
+$line = Get-Content .\SHA256SUMS | Where-Object { $_.EndsWith("  $archive") } | Select-Object -First 1
+if (-not $line) { throw "No SHA256SUMS entry found for $archive" }
+$expected = ($line -split '\s+')[0]
+$actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "SHA-256 mismatch for $archive" }
+$installDir = Join-Path $env:USERPROFILE ".local\bin"
+New-Item -ItemType Directory -Force $installDir | Out-Null
+Expand-Archive -LiteralPath $archive -DestinationPath $installDir
+$exe = Join-Path $installDir "potoo-linotte-interpreter-v0.1.1-x86_64-pc-windows-msvc\potoo-linotte.exe"
+& $exe .\bonjour.liv
+```
+
+To run `potoo-linotte.exe` from any folder, add `$env:USERPROFILE\.local\bin\potoo-linotte-interpreter-v0.1.1-x86_64-pc-windows-msvc` to your user `Path` environment variable in Windows Settings.
+
+#### Intel macOS x86_64
+
+```sh
+set -euo pipefail
+archive="potoo-linotte-interpreter-v0.1.1-x86_64-apple-darwin.tar.gz"
+grep -F "  $archive" SHA256SUMS | shasum -a 256 -c -
+tar -xzf "$archive"
+mkdir -p "$HOME/.local/bin"
+install -m 755 "${archive%.tar.gz}/potoo-linotte" "$HOME/.local/bin/potoo-linotte"
+export PATH="$HOME/.local/bin:$PATH"
+potoo-linotte bonjour.liv
+```
+
+#### Apple silicon macOS arm64
+
+```sh
+set -euo pipefail
+archive="potoo-linotte-interpreter-v0.1.1-aarch64-apple-darwin.tar.gz"
+grep -F "  $archive" SHA256SUMS | shasum -a 256 -c -
+tar -xzf "$archive"
+mkdir -p "$HOME/.local/bin"
+install -m 755 "${archive%.tar.gz}/potoo-linotte" "$HOME/.local/bin/potoo-linotte"
+export PATH="$HOME/.local/bin:$PATH"
+potoo-linotte bonjour.liv
+```
+
+On macOS, add the `export PATH="$HOME/.local/bin:$PATH"` line to `~/.zprofile` to keep the command available in future sessions.
 
 ### Install from source
 
